@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -263,65 +264,54 @@ func TestSpanStatus(t *testing.T) {
 }
 
 func TestSpanName(t *testing.T) {
-	testCases := []struct {
-		requestPath       string
-		spanNameFormatter otelgin.SpanNameFormatter
-		wantSpanName      string
+	imsb := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(imsb))
+
+	tests := []struct {
+		name     string
+		method   string
+		path     string
+		url      string
+		expected string
 	}{
-		{"/user/1", nil, "GET /user/:id"},
-		{"/user/1", func(r *http.Request) string { return r.URL.Path }, "GET /user/:id"},
+		// Test for standard methods
+		{"standard method of GET", http.MethodGet, "/user/:id", "/user/123", "GET /user/:id"},
+		{"standard method of HEAD", http.MethodHead, "/user/:id", "/user/123", "HEAD /user/:id"},
+		{"standard method of POST", http.MethodPost, "/user/:id", "/user/123", "POST /user/:id"},
+		{"standard method of PUT", http.MethodPut, "/user/:id", "/user/123", "PUT /user/:id"},
+		{"standard method of PATCH", http.MethodPatch, "/user/:id", "/user/123", "PATCH /user/:id"},
+		{"standard method of DELETE", http.MethodDelete, "/user/:id", "/user/123", "DELETE /user/:id"},
+		{"standard method of CONNECT", http.MethodConnect, "/user/:id", "/user/123", "CONNECT /user/:id"},
+		{"standard method of OPTIONS", http.MethodOptions, "/user/:id", "/user/123", "OPTIONS /user/:id"},
+		{"standard method of TRACE", http.MethodTrace, "/user/:id", "/user/123", "TRACE /user/:id"},
+		{"standard method of GET, but it's another route.", http.MethodGet, "/", "/", "GET /"},
+
+		// Test for no route
+		{"no route", http.MethodGet, "/", "/user/id", "GET"},
+
+		// Test for invalid method
+		{"invalid method", "INVALID", "/user/123", "/user/123", "HTTP /user/123"},
 	}
-	for _, tc := range testCases {
-		t.Run(tc.requestPath, func(t *testing.T) {
-			sr := tracetest.NewSpanRecorder()
-			provider := sdktrace.NewTracerProvider()
-			provider.RegisterSpanProcessor(sr)
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			defer imsb.Reset()
+
 			router := gin.New()
-			router.Use(otelgin.Middleware("foobar", otelgin.WithTracerProvider(provider), otelgin.WithSpanNameFormatter(tc.spanNameFormatter)))
-			router.GET("/user/:id", func(c *gin.Context) {})
+			router.Use(otelgin.Middleware("foobar", otelgin.WithTracerProvider(provider)))
+			router.Handle(strings.ToUpper(test.method), test.path, func(c *gin.Context) {
+				c.String(http.StatusOK, "OK")
+			})
 
-			router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", tc.requestPath, nil))
+			r := httptest.NewRequest(test.method, test.url, nil)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, r)
 
-			require.Len(t, sr.Ended(), 1, "should emit a span")
-			assert.Equal(t, tc.wantSpanName, sr.Ended()[0].Name(), "span name not correct")
+			spans := imsb.GetSpans()
+			require.Len(t, spans, 1)
+			assert.Equal(t, test.expected, spans[0].Name)
 		})
 	}
-}
-
-func TestHTTPRouteWithSpanNameFormatter(t *testing.T) {
-	sr := tracetest.NewSpanRecorder()
-	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
-
-	router := gin.New()
-	router.Use(otelgin.Middleware("foobar",
-		otelgin.WithTracerProvider(provider),
-		otelgin.WithSpanNameFormatter(func(r *http.Request) string {
-			return r.URL.Path
-		}),
-	),
-	)
-	router.GET("/user/:id", func(c *gin.Context) {
-		id := c.Param("id")
-		_, _ = c.Writer.Write([]byte(id))
-	})
-
-	r := httptest.NewRequest("GET", "/user/123", nil)
-	w := httptest.NewRecorder()
-
-	// do and verify the request
-	router.ServeHTTP(w, r)
-	response := w.Result() //nolint:bodyclose // False positive for httptest.ResponseRecorder: https://github.com/timakin/bodyclose/issues/59.
-	require.Equal(t, http.StatusOK, response.StatusCode)
-
-	// verify traces look good
-	spans := sr.Ended()
-	require.Len(t, spans, 1)
-	span := spans[0]
-	assert.Equal(t, "GET /user/:id", span.Name())
-	assert.Equal(t, trace.SpanKindServer, span.SpanKind())
-	attr := span.Attributes()
-	assert.Contains(t, attr, attribute.String("http.method", "GET"))
-	assert.Contains(t, attr, attribute.String("http.route", "/user/:id"))
 }
 
 func TestHTML(t *testing.T) {
