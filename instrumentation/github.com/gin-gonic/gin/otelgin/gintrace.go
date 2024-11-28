@@ -6,10 +6,11 @@
 package otelgin // import "go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 
 import (
-	"fmt"
+	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/gin-gonic/gin"
-
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin/internal/semconvutil"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -71,16 +72,7 @@ func Middleware(service string, opts ...Option) gin.HandlerFunc {
 			oteltrace.WithAttributes(semconv.HTTPRoute(c.FullPath())),
 			oteltrace.WithSpanKind(oteltrace.SpanKindServer),
 		}
-		var spanName string
-		if cfg.SpanNameFormatter == nil {
-			spanName = c.FullPath()
-		} else {
-			spanName = cfg.SpanNameFormatter(c.Request)
-		}
-		if spanName == "" {
-			spanName = fmt.Sprintf("HTTP %s route not found", c.Request.Method)
-		}
-		ctx, span := tracer.Start(ctx, spanName, opts...)
+		ctx, span := tracer.Start(ctx, spanNameFormatter(c), opts...)
 		defer span.End()
 
 		// pass the span through the request context
@@ -101,6 +93,26 @@ func Middleware(service string, opts ...Option) gin.HandlerFunc {
 			}
 		}
 	}
+}
+
+// spanNameFormatter is used to set span name by gin.Context.
+func spanNameFormatter(c *gin.Context) string {
+	method, path := strings.ToUpper(c.Request.Method), c.FullPath()
+	if !slices.Contains([]string{
+		http.MethodGet, http.MethodHead,
+		http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete,
+		http.MethodConnect, http.MethodOptions,
+		http.MethodTrace,
+	}, method) {
+		method = "HTTP"
+	}
+
+	if path != "" {
+		return method + " " + path
+	}
+
+	return method
 }
 
 // HTML will trace the rendering of the template as a child of the

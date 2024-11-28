@@ -157,7 +157,7 @@ func TestTrace200(t *testing.T) {
 	spans := sr.Ended()
 	require.Len(t, spans, 1)
 	span := spans[0]
-	assert.Equal(t, "/user/:id", span.Name())
+	assert.Equal(t, "GET /user/:id", span.Name())
 	assert.Equal(t, trace.SpanKindServer, span.SpanKind())
 	attr := span.Attributes()
 	assert.Contains(t, attr, attribute.String("net.host.name", "foobar"))
@@ -193,7 +193,7 @@ func TestError(t *testing.T) {
 	spans := sr.Ended()
 	require.Len(t, spans, 1)
 	span := spans[0]
-	assert.Equal(t, "/server_err", span.Name())
+	assert.Equal(t, "GET /server_err", span.Name())
 	attr := span.Attributes()
 	assert.Contains(t, attr, attribute.String("net.host.name", "foobar"))
 	assert.Contains(t, attr, attribute.Int("http.status_code", http.StatusInternalServerError))
@@ -268,8 +268,8 @@ func TestSpanName(t *testing.T) {
 		spanNameFormatter otelgin.SpanNameFormatter
 		wantSpanName      string
 	}{
-		{"/user/1", nil, "/user/:id"},
-		{"/user/1", func(r *http.Request) string { return r.URL.Path }, "/user/1"},
+		{"/user/1", nil, "GET /user/:id"},
+		{"/user/1", func(r *http.Request) string { return r.URL.Path }, "GET /user/:id"},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.requestPath, func(t *testing.T) {
@@ -317,7 +317,7 @@ func TestHTTPRouteWithSpanNameFormatter(t *testing.T) {
 	spans := sr.Ended()
 	require.Len(t, spans, 1)
 	span := spans[0]
-	assert.Equal(t, "/user/123", span.Name())
+	assert.Equal(t, "GET /user/:id", span.Name())
 	assert.Equal(t, trace.SpanKindServer, span.SpanKind())
 	attr := span.Attributes()
 	assert.Contains(t, attr, attribute.String("http.method", "GET"))

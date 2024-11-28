@@ -19,7 +19,7 @@ type config struct {
 	Propagators       propagation.TextMapPropagator
 	Filters           []Filter
 	GinFilters        []GinFilter
-	SpanNameFormatter SpanNameFormatter
+	SpanNameFormatter SpanNameFormatter // Deprecated: since 0.58.0, remove in 0.59.0.
 }
 
 // Filter is a predicate used to determine whether a given http.request should
@@ -31,6 +31,7 @@ type Filter func(*http.Request) bool
 type GinFilter func(*gin.Context) bool
 
 // SpanNameFormatter is used to set span name by http.request.
+// Deprecated: since 0.58.0, remove in 0.59.0.
 type SpanNameFormatter func(r *http.Request) string
 
 // Option specifies instrumentation configuration options.
@@ -86,8 +87,7 @@ func WithGinFilter(f ...GinFilter) Option {
 
 // WithSpanNameFormatter takes a function that will be called on every
 // request and the returned string will become the Span Name.
-func WithSpanNameFormatter(f func(r *http.Request) string) Option {
-	return optionFunc(func(c *config) {
-		c.SpanNameFormatter = f
-	})
+// Deprecated: since 0.58.0, remove in 0.59.0.
+func WithSpanNameFormatter(func(r *http.Request) string) Option {
+	return optionFunc(func(*config) {})
 }
