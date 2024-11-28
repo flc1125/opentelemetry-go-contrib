@@ -312,6 +312,29 @@ func TestSpanName(t *testing.T) {
 			assert.Equal(t, test.expected, spans[0].Name)
 		})
 	}
+
+	// Test for WithSpanNameFormatter
+	// Deprecated: since v0.58.0, removed in v0.59.0
+	t.Run("WithSpanNameFormatter", func(t *testing.T) {
+		router := gin.New()
+		router.Use(otelgin.Middleware("foobar", otelgin.WithTracerProvider(provider),
+			otelgin.WithSpanNameFormatter(func(*http.Request) string {
+				return "custom span name"
+			}),
+		))
+
+		router.GET("/", func(c *gin.Context) {
+			c.String(http.StatusOK, "OK")
+		})
+
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, r)
+
+		spans := imsb.GetSpans()
+		require.Len(t, spans, 1)
+		assert.Equal(t, "GET /", spans[0].Name)
+	})
 }
 
 func TestHTML(t *testing.T) {
