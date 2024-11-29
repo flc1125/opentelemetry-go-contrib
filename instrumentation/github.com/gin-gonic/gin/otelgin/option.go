@@ -87,7 +87,7 @@ func WithGinFilter(f ...GinFilter) Option {
 
 // WithSpanNameFormatter takes a function that will be called on every
 // request and the returned string will become the Span Name.
-// Deprecated: since 0.58.0, remove in 0.59.0.
+// Deprecated: [0.58.0] the span name now follows semantic conventions.
 func WithSpanNameFormatter(func(r *http.Request) string) Option {
 	return optionFunc(func(*config) {})
 }
