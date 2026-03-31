@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- Add `Resource` method to `SDK` in `go.opentelemetry.io/contrib/otelconf/v0.3.0` to expose the resolved SDK resource from declarative configuration. (#8660)
 - Configuration file can now be set via `OTEL_CONFIG_FILE` in `go.opentelemetry.io/contrib/otelconf`. (#8639)
 - Added support for `service` resource detector in `go.opentelemetry.io/contrib/otelconf`. (#8674)
 - Added support for `attribute_count_limit` and `attribute_value_length_limit` in tracer provider configuration in `go.opentelemetry.io/contrib/otelconf`. (#8687)
