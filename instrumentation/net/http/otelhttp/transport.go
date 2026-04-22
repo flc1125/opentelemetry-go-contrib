@@ -110,6 +110,98 @@ func (w *requestBodyTracker) Closed() bool {
 	return w.closed.Load()
 }
 
+// requestMetricFinalizer owns request-body tracking and ensures metrics are
+// recorded once the active body has reached a stable final state.
+type requestMetricFinalizer struct {
+	mu         sync.Mutex
+	activeBody *requestBodyTracker
+	finalize   func()
+}
+
+func newRequestMetricFinalizer() *requestMetricFinalizer {
+	return &requestMetricFinalizer{
+		finalize: func() {},
+	}
+}
+
+func (f *requestMetricFinalizer) Wrap(body io.ReadCloser) io.ReadCloser {
+	if body == nil || body == http.NoBody {
+		return body
+	}
+
+	var trackedBody *requestBodyTracker
+	trackedBody = newRequestBodyTracker(body, func() {
+		f.finalizeTrackedBody(trackedBody)
+	})
+
+	f.mu.Lock()
+	f.activeBody = trackedBody
+	f.mu.Unlock()
+
+	return trackedBody
+}
+
+func (f *requestMetricFinalizer) ClearActiveBody() {
+	f.mu.Lock()
+	f.activeBody = nil
+	f.mu.Unlock()
+}
+
+func (f *requestMetricFinalizer) SetFinalize(fn func(requestSize int64)) {
+	var once sync.Once
+
+	f.mu.Lock()
+	f.finalize = func() {
+		requestSize := f.RequestSize()
+		once.Do(func() {
+			fn(requestSize)
+		})
+	}
+	f.mu.Unlock()
+}
+
+func (f *requestMetricFinalizer) RequestSize() int64 {
+	f.mu.Lock()
+	body := f.activeBody
+	f.mu.Unlock()
+
+	if body == nil {
+		return 0
+	}
+
+	return body.BytesRead()
+}
+
+func (f *requestMetricFinalizer) Finalize() {
+	f.mu.Lock()
+	finalize := f.finalize
+	f.mu.Unlock()
+
+	finalize()
+}
+
+func (f *requestMetricFinalizer) FinalizeIfBodyClosed() {
+	f.mu.Lock()
+	body := f.activeBody
+	finalize := f.finalize
+	f.mu.Unlock()
+
+	if body == nil || body.Closed() {
+		finalize()
+	}
+}
+
+func (f *requestMetricFinalizer) finalizeTrackedBody(body *requestBodyTracker) {
+	f.mu.Lock()
+	isActive := f.activeBody == body
+	finalize := f.finalize
+	f.mu.Unlock()
+
+	if isActive {
+		finalize()
+	}
+}
+
 // RoundTrip creates a Span and propagates its context via the provided request's headers
 // before handing the request to the configured base RoundTripper. The created span will
 // end when the response body is closed or when a read from the body returns io.EOF.
@@ -145,54 +237,17 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 	r = r.Clone(ctx) // According to RoundTripper spec, we shouldn't modify the origin request.
 
-	// lastBodyMu protects both lastTrackedBody and recordMetrics from
-	// concurrent access. The request body tracker callback may fire on a
-	// different goroutine (e.g. during transport retries) while the main
-	// goroutine is still assigning recordMetrics after RoundTrip returns.
-	var (
-		lastBodyMu      sync.Mutex
-		lastTrackedBody *requestBodyTracker
-		recordMetrics   = func() {}
-	)
-	setLastTrackedBody := func(body *requestBodyTracker) {
-		lastBodyMu.Lock()
-		lastTrackedBody = body
-		lastBodyMu.Unlock()
-	}
-	currentTrackedBody := func() *requestBodyTracker {
-		lastBodyMu.Lock()
-		defer lastBodyMu.Unlock()
-		return lastTrackedBody
-	}
-	callRecordMetrics := func() {
-		lastBodyMu.Lock()
-		fn := recordMetrics
-		lastBodyMu.Unlock()
-		fn()
-	}
-	maybeWrapBody := func(body io.ReadCloser) io.ReadCloser {
-		if body == nil || body == http.NoBody {
-			return body
-		}
-		var trackedBody *requestBodyTracker
-		trackedBody = newRequestBodyTracker(body, func() {
-			if currentTrackedBody() == trackedBody {
-				callRecordMetrics()
-			}
-		})
-		setLastTrackedBody(trackedBody)
-		return trackedBody
-	}
-	r.Body = maybeWrapBody(r.Body)
+	finalizer := newRequestMetricFinalizer()
+	r.Body = finalizer.Wrap(r.Body)
 	if r.GetBody != nil {
 		originalGetBody := r.GetBody
 		r.GetBody = func() (io.ReadCloser, error) {
 			b, err := originalGetBody()
 			if err != nil {
-				setLastTrackedBody(nil) // The underlying transport will fail to make a retry request, hence, record no data.
+				finalizer.ClearActiveBody() // The underlying transport will fail to make a retry request, hence, record no data.
 				return nil, err
 			}
-			return maybeWrapBody(b), nil
+			return finalizer.Wrap(b), nil
 		}
 	}
 
@@ -215,29 +270,19 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 	// Delay metric recording until the response body is finalized. The
 	// transport can continue reading the request body after RoundTrip returns.
-	var recordMetricsOnce sync.Once
-	fn := func() {
-		var requestSize int64
-		if lastTrackedBody := currentTrackedBody(); lastTrackedBody != nil {
-			requestSize = lastTrackedBody.BytesRead()
-		}
-		recordMetricsOnce.Do(func() {
-			t.semconv.RecordMetrics(
-				ctx,
-				semconv.MetricData{
-					RequestSize:     requestSize,
-					RequestDuration: requestDuration,
-				},
-				metricOptions,
-			)
-		})
-	}
-	lastBodyMu.Lock()
-	recordMetrics = fn
-	lastBodyMu.Unlock()
+	finalizer.SetFinalize(func(requestSize int64) {
+		t.semconv.RecordMetrics(
+			ctx,
+			semconv.MetricData{
+				RequestSize:     requestSize,
+				RequestDuration: requestDuration,
+			},
+			metricOptions,
+		)
+	})
 
 	if err != nil {
-		callRecordMetrics()
+		finalizer.Finalize()
 		span.SetAttributes(otelsemconv.ErrorType(err))
 		span.SetStatus(codes.Error, err.Error())
 		span.End()
@@ -246,10 +291,7 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 
 	readRecordFunc := func(int64) {
-		lastTrackedBody := currentTrackedBody()
-		if lastTrackedBody == nil || lastTrackedBody.Closed() {
-			callRecordMetrics()
-		}
+		finalizer.FinalizeIfBodyClosed()
 	}
 	res.Body = newWrappedBody(span, readRecordFunc, res.Body)
 	// traces
