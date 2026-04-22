@@ -312,17 +312,17 @@ func (t *Transport) metricAttributesFromRequest(r *http.Request) []attribute.Key
 // newWrappedBody returns a new and appropriately scoped *wrappedBody as an
 // io.ReadCloser. If the passed body implements io.Writer, the returned value
 // will implement io.ReadWriteCloser.
-func newWrappedBody(span trace.Span, record func(n int64), body io.ReadCloser) io.ReadCloser {
+func newWrappedBody(span trace.Span, onFinalize func(n int64), body io.ReadCloser) io.ReadCloser {
 	// The successful protocol switch responses will have a body that
 	// implement an io.ReadWriteCloser. Ensure this interface type continues
 	// to be satisfied if that is the case.
 	if _, ok := body.(io.ReadWriteCloser); ok {
-		return &wrappedBody{span: span, record: record, body: body}
+		return &wrappedBody{span: span, onFinalize: onFinalize, body: body}
 	}
 
 	// Remove the implementation of the io.ReadWriteCloser and only implement
 	// the io.ReadCloser.
-	return struct{ io.ReadCloser }{&wrappedBody{span: span, record: record, body: body}}
+	return struct{ io.ReadCloser }{&wrappedBody{span: span, onFinalize: onFinalize, body: body}}
 }
 
 // wrappedBody is the response body type returned by the transport
@@ -334,10 +334,10 @@ func newWrappedBody(span trace.Span, record func(n int64), body io.ReadCloser) i
 // If the response body implements the io.Writer interface (i.e. for
 // successful protocol switches), the wrapped body also will.
 type wrappedBody struct {
-	span   trace.Span
-	record func(n int64)
-	body   io.ReadCloser
-	read   atomic.Int64
+	span       trace.Span
+	onFinalize func(n int64)
+	body       io.ReadCloser
+	bytesRead  atomic.Int64
 
 	closeOnce    sync.Once
 	closeErr     error
@@ -359,13 +359,13 @@ func (wb *wrappedBody) Write(p []byte) (int, error) {
 func (wb *wrappedBody) Read(b []byte) (int, error) {
 	n, err := wb.body.Read(b)
 	// Record the number of bytes read
-	wb.read.Add(int64(n))
+	wb.bytesRead.Add(int64(n))
 
 	switch err {
 	case nil:
 		// nothing to do here but fall through to the return
 	case io.EOF:
-		wb.recordMetricsOnce()
+		wb.finalize()
 	default:
 		wb.span.SetAttributes(otelsemconv.ErrorType(err))
 		wb.span.SetStatus(codes.Error, err.Error())
@@ -373,7 +373,7 @@ func (wb *wrappedBody) Read(b []byte) (int, error) {
 	return n, err
 }
 
-func (wb *wrappedBody) closeBody() error {
+func (wb *wrappedBody) closeUnderlying() error {
 	wb.closeOnce.Do(func() {
 		if wb.body != nil {
 			wb.closeErr = wb.body.Close()
@@ -383,16 +383,16 @@ func (wb *wrappedBody) closeBody() error {
 	return wb.closeErr
 }
 
-// recordMetricsOnce ensures the final number of bytes read is recorded once.
-func (wb *wrappedBody) recordMetricsOnce() {
+// finalize records the final number of bytes read and ends the span once.
+func (wb *wrappedBody) finalize() {
 	wb.finalizeOnce.Do(func() {
-		wb.record(wb.read.Load())
+		wb.onFinalize(wb.bytesRead.Load())
 		wb.span.End()
 	})
 }
 
 func (wb *wrappedBody) Close() error {
-	err := wb.closeBody()
-	wb.recordMetricsOnce()
+	err := wb.closeUnderlying()
+	wb.finalize()
 	return err
 }
